@@ -5,7 +5,7 @@ import re
 import dns.resolver
 import smtplib
 import socket
-from io import StringIO, BytesIO
+from io import StringIO, Bytes5IO
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
@@ -221,7 +221,7 @@ def verify_contacts():
         
         # Process contacts with workers
         results = []
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=1) as executor:
             futures = []
             for contact in contacts:
                 future = executor.submit(process_contact, contact, max_emails, max_phones)
@@ -340,3 +340,4 @@ def home():
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+
