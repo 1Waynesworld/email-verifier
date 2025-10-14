@@ -1,182 +1,342 @@
-<!-- Wayne's Advanced Email & Phone Verifier -->
-<div style="min-height:100vh;background:#0b1220;padding:42px 14px;box-sizing:border-box;">
-  <div style="max-width:980px;margin:0 auto;background:#0f172a;border-radius:20px;border:1px solid #1f2937;box-shadow:0 18px 55px rgba(0,0,0,.35);overflow:hidden;font-family:Inter,system-ui,Arial;">
-    <!-- Header -->
-    <div style="background:linear-gradient(180deg,#244ea3 0%, #1e3a8a 100%);padding:28px 34px;color:#fff;">
-      <div style="display:flex;align-items:center;gap:12px;">
-        <div style="font-size:28px">🚀</div>
-        <h1 style="margin:0;font-weight:800;font-size:34px;letter-spacing:.2px;">
-          Wayne's Advanced Verifier
-        </h1>
-      </div>
-      <div style="opacity:.95;margin-top:6px;font-size:14px">
-        Smart Detection • Multi-Contact • Email + Phone Verification
-      </div>
-    </div>
+from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
+import csv
+import re
+import dns.resolver
+import smtplib
+import socket
+from io import StringIO, BytesIO
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import random
+import threading
 
-    <!-- Body -->
-    <div style="padding:28px 34px;color:#e5e7eb;">
-      <!-- Upload zone -->
-      <div style="border:2px dashed #3b82f6;border-radius:16px;padding:24px;background:#0f172a;margin-bottom:18px;">
-        <div style="margin-bottom:16px;">
-          <div style="font-weight:700;font-size:18px;margin-bottom:8px">Upload Your Contact List</div>
-          <div style="opacity:.8;font-size:13px;margin-bottom:12px">CSV with ANY columns - we'll auto-detect emails & phones!</div>
-          <input id="client" placeholder="Client name (optional)" style="width:100%;max-width:300px;padding:10px 12px;border-radius:10px;border:1px solid #334155;background:#0b1220;color:#e5e7eb;">
-        </div>
+app = Flask(__name__)
+CORS(app, origins=["*"])
 
-        <!-- Settings -->
-        <div style="display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap;">
-          <div>
-            <label style="font-size:13px;color:#94a3b8;display:block;margin-bottom:4px;">Max Emails per Person</label>
-            <select id="maxEmails" style="padding:8px 12px;border-radius:8px;border:1px solid #334155;background:#0b1220;color:#e5e7eb;">
-              <option value="1">1 Email</option>
-              <option value="2">2 Emails</option>
-              <option value="3" selected>3 Emails</option>
-            </select>
-          </div>
-          <div>
-            <label style="font-size:13px;color:#94a3b8;display:block;margin-bottom:4px;">Max Phones per Person</label>
-            <select id="maxPhones" style="padding:8px 12px;border-radius:8px;border:1px solid #334155;background:#0b1220;color:#e5e7eb;">
-              <option value="1">1 Phone</option>
-              <option value="2">2 Phones</option>
-              <option value="3">3 Phones</option>
-              <option value="4">4 Phones</option>
-              <option value="5" selected>5 Phones</option>
-            </select>
-          </div>
-        </div>
+# Global storage for progress tracking
+progress_data = {}
+progress_lock = threading.Lock()
 
-        <input id="csv" type="file" accept=".csv" style="display:none;">
+def extract_contact_info(row):
+    """Extract emails and phone numbers from any CSV row."""
+    contact = {
+        'first_name': '',
+        'last_name': '',
+        'emails': [],
+        'phones': []
+    }
+    
+    # Email pattern
+    email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+    # Phone pattern (various formats)
+    phone_pattern = r'[\+]?[(]?[0-9]{1,3}[)]?[-.\s]?[(]?[0-9]{1,4}[)]?[-.\s]?[0-9]{1,4}[-.\s]?[0-9]{1,9}'
+    
+    for key, value in row.items():
+        if value and isinstance(value, str):
+            # Look for name fields
+            if key and 'first' in key.lower():
+                contact['first_name'] = value.strip()
+            elif key and 'last' in key.lower():
+                contact['last_name'] = value.strip()
+            
+            # Find all emails in this field
+            found_emails = re.findall(email_pattern, value)
+            contact['emails'].extend(found_emails)
+            
+            # Find all phones in this field
+            found_phones = re.findall(phone_pattern, value)
+            # Clean up phone numbers
+            cleaned_phones = []
+            for phone in found_phones:
+                # Remove non-digit chars and check length
+                digits = re.sub(r'\D', '', phone)
+                if 7 <= len(digits) <= 15:  # Valid phone length
+                    cleaned_phones.append(phone)
+            contact['phones'].extend(cleaned_phones)
+    
+    # Remove duplicates
+    contact['emails'] = list(dict.fromkeys(contact['emails']))
+    contact['phones'] = list(dict.fromkeys(contact['phones']))
+    
+    return contact
+
+def check_mx_records(domain):
+    """Check if domain has valid MX records."""
+    try:
+        mx_records = dns.resolver.resolve(domain, 'MX')
+        return len(mx_records) > 0
+    except:
+        return False
+
+def verify_smtp(email, mx_host, timeout=10):
+    """Verify email via SMTP conversation."""
+    try:
+        with smtplib.SMTP(timeout=timeout) as server:
+            server.connect(mx_host, 25)
+            server.helo('verifier.com')
+            code, _ = server.mail('test@verifier.com')
+            if code != 250:
+                return False
+            code, _ = server.rcpt(email)
+            server.quit()
+            return code == 250
+    except:
+        return False
+
+def verify_email_advanced(email):
+    """Advanced email verification with multiple checks."""
+    result = {
+        'email': email,
+        'valid': False,
+        'checks': {
+            'format': False,
+            'domain': False,
+            'mx': False,
+            'smtp': False
+        }
+    }
+    
+    # Format check
+    email_regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if not re.match(email_regex, email):
+        return result
+    result['checks']['format'] = True
+    
+    # Domain check
+    domain = email.split('@')[1]
+    try:
+        socket.gethostbyname(domain)
+        result['checks']['domain'] = True
+    except:
+        return result
+    
+    # MX records check
+    if check_mx_records(domain):
+        result['checks']['mx'] = True
+    else:
+        return result
+    
+    # SMTP check (with MX hosts)
+    try:
+        mx_records = dns.resolver.resolve(domain, 'MX')
+        mx_hosts = sorted([(r.preference, str(r.exchange).rstrip('.')) for r in mx_records])
         
-        <div id="fileNameDisplay" style="font-size:13px;color:#22c55e;margin-bottom:12px;display:none;padding:8px 12px;background:#0b1220;border-radius:8px;border:1px solid #1f2937;">
-          📄 <strong>Selected:</strong> <span id="selectedFileName"></span>
-        </div>
+        for _, mx_host in mx_hosts[:3]:  # Try first 3 MX hosts
+            if verify_smtp(email, mx_host):
+                result['checks']['smtp'] = True
+                result['valid'] = True
+                break
+    except:
+        pass
+    
+    # If no SMTP but has MX, consider it valid
+    if not result['checks']['smtp'] and result['checks']['mx']:
+        result['valid'] = True
+    
+    return result
 
-        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
-          <label for="csv" style="display:inline-flex;align-items:center;gap:8px;background:#334155;border:1px solid #475569;color:#fff;border-radius:12px;padding:12px 16px;cursor:pointer;">
-            <span>📂 Choose CSV File</span>
-          </label>
+def verify_phone_basic(phone):
+    """Basic phone validation."""
+    # Remove all non-digit characters
+    digits = re.sub(r'\D', '', phone)
+    
+    # Check if it's a valid length (7-15 digits)
+    if 7 <= len(digits) <= 15:
+        # Check for obviously invalid patterns
+        if digits == '0' * len(digits) or digits == '1' * len(digits):
+            return False
+        if digits.startswith('555') and len(digits) == 10:  # Fake US numbers
+            return False
+        return True
+    return False
 
-          <button id="run" style="display:inline-flex;align-items:center;gap:8px;background:#22c55e;border:1px solid #16a34a;color:#052e12;border-radius:12px;padding:12px 18px;font-weight:800;cursor:pointer;">
-            ▶️ Start Verification
-          </button>
-
-          <label style="margin-left:auto;"><input id="dedupe" type="checkbox"> Dedupe</label>
-        </div>
-      </div>
-
-      <!-- Progress -->
-      <div style="display:flex;align-items:center;gap:10px;margin:6px 0;">
-        <div style="width:100%;height:14px;background:#0f172a;border:1px solid #1f2937;border-radius:999px;overflow:hidden">
-          <div id="bar" style="width:0%;height:100%;background:linear-gradient(90deg,#3b82f6,#06b6d4,#22c55e);transition:width .22s;"></div>
-        </div>
-        <div id="pct" style="width:48px;text-align:right;color:#cbd5e1;">0%</div>
-      </div>
-      <div id="status" style="margin:4px 0 14px 2px;font-size:13px;color:#94a3b8;">Ready to verify contacts</div>
-
-      <!-- Results -->
-      <div id="cards" style="display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;"></div>
-      <pre id="out" style="margin-top:10px;background:#0f172a;color:#e5e7eb;padding:14px;border-radius:12px;white-space:pre-wrap;min-height:88px;border:1px solid #1f2937;font-size:12px;"></pre>
-      <div id="links" style="margin-top:12px;display:flex;gap:12px;flex-wrap:wrap;"></div>
-
-      <div style="margin-top:14px;font-size:12px;color:#94a3b8;">
-        Powered by Railway • Advanced Multi-Contact Verifier
-      </div>
-    </div>
-  </div>
-</div>
-
-<script>
-(() => {
-  const API_URL = "https://email-verifier-production-7d9d.up.railway.app/verify";
-
-  const el = id => document.getElementById(id);
-  const run = el("run"), csv = el("csv"), bar = el("bar"), pct = el("pct");
-  const out = el("out"), links = el("links"), status = el("status"), cards = el("cards");
-  const fileNameDisplay = el("fileNameDisplay");
-  const selectedFileName = el("selectedFileName");
-
-  csv.addEventListener('change', function() {
-    if (this.files && this.files[0]) {
-      selectedFileName.textContent = this.files[0].name;
-      fileNameDisplay.style.display = 'block';
+def process_contact(contact, max_emails=2, max_phones=3):
+    """Process a single contact with verification."""
+    # Verify emails (up to max_emails)
+    emails_to_verify = contact['emails'][:max_emails]
+    email_results = []
+    
+    for email in emails_to_verify:
+        verification = verify_email_advanced(email)
+        email_results.append({
+            'email': email,
+            'valid': verification['valid']
+        })
+    
+    # Verify phones (up to max_phones)
+    phones_to_verify = contact['phones'][:max_phones]
+    phone_results = []
+    
+    for phone in phones_to_verify:
+        phone_results.append({
+            'phone': phone,
+            'valid': verify_phone_basic(phone)
+        })
+    
+    return {
+        'first_name': contact['first_name'],
+        'last_name': contact['last_name'],
+        'email_results': email_results,
+        'phone_results': phone_results
     }
-  });
 
-  function card(title, value, color){
-    const c = document.createElement("div");
-    c.style = "min-width:120px;background:#0f172a;border:1px solid #1f2937;border-radius:12px;padding:12px 14px;";
-    c.innerHTML = `<div style="font-size:12px;color:#94a3b8">${title}</div>
-                   <div style="font-weight:900;font-size:24px;color:${color}">${value}</div>`;
-    return c;
-  }
+@app.route('/verify', methods=['POST', 'OPTIONS'])
+def verify_contacts():
+    """Main endpoint for verification."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    try:
+        # Get parameters
+        max_emails = min(int(request.args.get('max_emails', 2)), 3)
+        max_phones = min(int(request.args.get('max_phones', 3)), 5)
+        
+        # Get CSV file
+        file = request.files['file']
+        content = file.read().decode('utf-8-sig')  # Handle BOM
+        
+        # Parse CSV
+        csv_reader = csv.DictReader(StringIO(content))
+        rows = list(csv_reader)
+        
+        if not rows:
+            return jsonify({'error': 'Empty CSV file'}), 400
+        
+        # Extract contacts
+        contacts = []
+        for row in rows:
+            contact = extract_contact_info(row)
+            if contact['emails'] or contact['phones']:  # Only process if has data
+                contacts.append(contact)
+        
+        # Initialize progress
+        task_id = str(time.time())
+        with progress_lock:
+            progress_data[task_id] = {
+                'total': len(contacts),
+                'processed': 0,
+                'results': []
+            }
+        
+        # Process contacts with workers
+        results = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = []
+            for contact in contacts:
+                future = executor.submit(process_contact, contact, max_emails, max_phones)
+                futures.append(future)
+            
+            for future in as_completed(futures):
+                result = future.result()
+                results.append(result)
+                
+                # Update progress
+                with progress_lock:
+                    if task_id in progress_data:
+                        progress_data[task_id]['processed'] += 1
+                        progress_data[task_id]['results'] = results
+        
+        # Generate output CSV
+        output = StringIO()
+        fieldnames = ['first_name', 'last_name']
+        
+        # Add email fields
+        for i in range(max_emails):
+            fieldnames.extend([f'email_{i+1}', f'email_{i+1}_valid'])
+        
+        # Add phone fields
+        for i in range(max_phones):
+            fieldnames.extend([f'phone_{i+1}', f'phone_{i+1}_valid'])
+        
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        
+        # Count statistics
+        total_rows = len(results)
+        valid_emails = 0
+        invalid_emails = 0
+        valid_phones = 0
+        invalid_phones = 0
+        
+        for result in results:
+            row = {
+                'first_name': result['first_name'],
+                'last_name': result['last_name']
+            }
+            
+            # Add email results
+            for i, email_result in enumerate(result['email_results'][:max_emails]):
+                row[f'email_{i+1}'] = email_result['email']
+                row[f'email_{i+1}_valid'] = '✓' if email_result['valid'] else '✗'
+                if email_result['valid']:
+                    valid_emails += 1
+                else:
+                    invalid_emails += 1
+            
+            # Add phone results
+            for i, phone_result in enumerate(result['phone_results'][:max_phones]):
+                row[f'phone_{i+1}'] = phone_result['phone']
+                row[f'phone_{i+1}_valid'] = '✓' if phone_result['valid'] else '✗'
+                if phone_result['valid']:
+                    valid_phones += 1
+                else:
+                    invalid_phones += 1
+            
+            writer.writerow(row)
+        
+        # Save output
+        output_content = output.getvalue()
+        output_filename = f'verified_contacts_{int(time.time())}.csv'
+        
+        # Store for download
+        with open(f'/tmp/{output_filename}', 'w', encoding='utf-8') as f:
+            f.write(output_content)
+        
+        # Clean up progress data
+        with progress_lock:
+            if task_id in progress_data:
+                del progress_data[task_id]
+        
+        return jsonify({
+            'success': True,
+            'total_rows': total_rows,
+            'valid_emails': valid_emails,
+            'invalid_emails': invalid_emails,
+            'valid_phones': valid_phones,
+            'invalid_phones': invalid_phones,
+            'download': f'/download/{output_filename}'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
-  function setProgress(p){
-    p = Math.max(0, Math.min(100, Math.round(p)));
-    bar.style.width = p + "%";
-    pct.textContent = p + "%";
-  }
+@app.route('/download/<filename>')
+def download_file(filename):
+    """Download verified results."""
+    try:
+        return send_file(
+            f'/tmp/{filename}',
+            as_attachment=True,
+            download_name=filename,
+            mimetype='text/csv'
+        )
+    except:
+        return jsonify({'error': 'File not found'}), 404
 
-  run.onclick = async () => {
-    try{
-      if(!csv.files[0]){ alert("Pick a CSV first."); return; }
+@app.route('/test')
+def test():
+    """Test endpoint."""
+    return jsonify({'status': 'Email verifier is running!'})
 
-      const q = new URLSearchParams();
-      const client = el("client").value.trim();
-      const maxEmails = el("maxEmails").value;
-      const maxPhones = el("maxPhones").value;
-      
-      if (client) q.set("client", client);
-      q.set("max_emails", maxEmails);
-      q.set("max_phones", maxPhones);
-      if (el("dedupe").checked) q.set("dedupe","1");
+@app.route('/')
+def home():
+    """Home endpoint."""
+    return jsonify({
+        'service': 'Advanced Email & Phone Verifier',
+        'version': '2.0',
+        'endpoints': ['/verify', '/test', '/download/<filename>']
+    })
 
-      const fd = new FormData();
-      fd.append("file", csv.files[0]);
-
-      status.textContent = `⚡ Verifying up to ${maxEmails} emails + ${maxPhones} phones per contact...`;
-      out.textContent = "";
-      links.innerHTML = "";
-      cards.innerHTML = "";
-      setProgress(0);
-
-      let progress = 0;
-      const progressInterval = setInterval(() => {
-        progress = Math.min(95, progress + 2);
-        setProgress(progress);
-      }, 500);
-
-      const res = await fetch(`${API_URL}?${q.toString()}`, { method:"POST", body:fd });
-      const data = await res.json();
-
-      clearInterval(progressInterval);
-      setProgress(100);
-      status.textContent = `✅ Complete!`;
-      out.textContent = JSON.stringify(data, null, 2);
-
-      const v = n => (n==null?0:n);
-      cards.appendChild(card("Total Rows", v(data.total_rows), "#60a5fa"));
-      cards.appendChild(card("✅ Valid Emails", v(data.valid_emails), "#22c55e"));
-      cards.appendChild(card("❌ Invalid Emails", v(data.invalid_emails), "#ef4444"));
-      cards.appendChild(card("✅ Valid Phones", v(data.valid_phones), "#10b981"));
-      cards.appendChild(card("❌ Invalid Phones", v(data.invalid_phones), "#f59e0b"));
-
-      function btn(href, text){
-        const a = document.createElement("a");
-        a.href = `https://email-verifier-production-7d9d.up.railway.app${href}`;
-        a.download = "";
-        a.textContent = text;
-        a.style = "display:inline-flex;align-items:center;gap:8px;background:#1f2937;border:1px solid #334155;color:#e5e7eb;border-radius:10px;padding:10px 14px;text-decoration:none;font-weight:700;cursor:pointer;";
-        return a;
-      }
-      
-      if (data.download) links.appendChild(btn(data.download, "⬇️ Download Verified Contacts"));
-
-    }catch(e){
-      status.textContent = "❌ Error - see details below";
-      out.textContent = String(e);
-      setProgress(0);
-    }
-  };
-})();
-</script>
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
