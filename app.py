@@ -5,7 +5,7 @@ import re
 import dns.resolver
 import smtplib
 import socket
-from io import StringIO, Bytes5IO
+from io import StringIO, BytesIO
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
@@ -247,7 +247,7 @@ def verify_contacts():
         
         # Add phone fields
         for i in range(max_phones):
-return send_file(f'/tmp/{filename}',
+            fieldnames.extend([f'phone_{i+1}', f'phone_{i+1}_valid'])
         
         writer = csv.DictWriter(output, fieldnames=fieldnames)
         writer.writeheader()
@@ -289,8 +289,8 @@ return send_file(f'/tmp/{filename}',
         output_content = output.getvalue()
         output_filename = f'verified_contacts_{int(time.time())}.csv'
         
-        # Store for download
-      with open(f'./{output_filename}', 'w', encoding='utf-8') as f:
+        # Store for download - FIXED: Using ./ instead of /tmp/
+        with open(f'./{output_filename}', 'w', encoding='utf-8') as f:
             f.write(output_content)
         
         # Clean up progress data
@@ -315,8 +315,9 @@ return send_file(f'/tmp/{filename}',
 def download_file(filename):
     """Download verified results."""
     try:
+        # FIXED: Using ./ instead of /tmp/
         return send_file(
-            f'/tmp/{filename}',
+            f'./{filename}',
             as_attachment=True,
             download_name=filename,
             mimetype='text/csv'
@@ -340,6 +341,3 @@ def home():
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
-
-
-
