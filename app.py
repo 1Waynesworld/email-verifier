@@ -290,7 +290,7 @@ def verify_contacts():
         output_filename = f'verified_contacts_{int(time.time())}.csv'
         
         # Store for download
-        with open(f'/tmp/{output_filename}', 'w', encoding='utf-8') as f:
+      with open(f'./{output_filename}', 'w', encoding='utf-8') as f:
             f.write(output_content)
         
         # Clean up progress data
@@ -340,4 +340,5 @@ def home():
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+
 
