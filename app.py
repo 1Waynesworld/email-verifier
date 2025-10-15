@@ -247,7 +247,7 @@ def verify_contacts():
         
         # Add phone fields
         for i in range(max_phones):
-            fieldnames.extend([f'phone_{i+1}', f'phone_{i+1}_valid'])
+return send_file(f'/tmp/{filename}',
         
         writer = csv.DictWriter(output, fieldnames=fieldnames)
         writer.writeheader()
@@ -340,5 +340,6 @@ def home():
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+
 
 
